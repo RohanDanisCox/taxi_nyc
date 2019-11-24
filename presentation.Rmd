@@ -12,11 +12,15 @@ output:
 knitr::opts_chunk$set(echo = TRUE)
 library(ggplot2)
 library(feather)
+library(dplyr)
+library(scales)
 ```
 
 
-```{r eval = FALSE, include= FALSE}
+```{r eval = TRUE, include= FALSE}
 train <- read_feather("split_data/train.feather")
+train_2 <- read_feather("split_data/train_2.feather")
+taxi_zone_busy <- readRDS("taxi_zone_busy.rds")
 ```
 
 ## Setting Up
@@ -33,7 +37,7 @@ Before I launch into the questions I need to prepare the data a little to make s
 
 ### Joining the data
 
-The data comes across two spreadsheets but can be matched by joining on medallion,hack_license, vendor_id and pickup_datetime. Joining introduces a negligible increase in observations of about 1300 duplicates, mostly resulting from incorrect location data and payment types. 
+The data comes across two spreadsheets but can be matched by joining on medallion,hack_license, vendor_id and pickup_datetime. Joining introduces a negligible increase in observations of about 1300 duplicates, mostly resulting from incorrect location data and payment types. I am expecting these to be stripped out when I clean variables next.
 
 ```{r eval=FALSE}
   data <- left_join(trip_data_raw,trip_fare_raw, Joining, by = c("medallion", "hack_license", "vendor_id", "pickup_datetime"))
@@ -44,9 +48,9 @@ The data comes across two spreadsheets but can be matched by joining on medallio
 There is a bit of fairly obvious filtering which should be done to remove observations which have:
 
 * 0 passengers
-* short trip times - here I have used less than 30 seconds
+* short trip times - say less than 30 seconds
 * short trip distances - say less than 100 meters
-* pickup or dropoff longitude less than -75 or greater than -73
+* pickup or dropoff longitude less than -75 or greater than -73 
 * pickup or dropoff latitude greater than 42 or less than 40
 
 Furthermore, I can produce a few useful features like speed and day of week. I am going to assume the trip distance variable is in miles and therefore calculate speed in miles per hour. I am also assuming that average speed should be below 70 miles per hour.
@@ -70,7 +74,7 @@ Furthermore, I can produce a few useful features like speed and day of week. I a
     mutate(day_of_week = wday(pickup_hour, label = TRUE))
 ```
 
-This removes about 500,000 observations but leaves us with still well over 14 million. 
+This removes about 500,000 observations leaving well over 14 million. 
 
 ### Splitting the data
 
@@ -91,76 +95,201 @@ Given this, I've decided to go with a 50/25/25 split using sample twice to achie
   test <- remainder[-remainder_index,]
 ```
 
-I would need the buckets to be larger to be able to classify trips appropriately. 
-
-```{r eval=FALSE}
-  distinct_locations <- readRDS("saved_visualisations/distinct_locations.rds")
-  distinct_locations
-```
-
-I've located some taxi zones on the [Taxi and Limousine commision site](https://www1.nyc.gov/site/tlc/about/tlc-trip-record-data.page) and have tried to match this with the data to identify both pickup and drop off locations that could suit the 'trip' idea better.
-
-Finally I'd want to 
-
-### Splitting the data
-
-Even though I am working from a Google Cloud Platform instance the size of the data is inhibiting my ability to move quickly. One solution to this, which will be useful down the line when modelling is to split the data into a train, validation and test set. Not only does splitting before any analysis maintain the integrity of the test set, but it also allows me to work with a smaller, more manageable dataset.
-
-Given this, I've decided to go with a 50/25/25 split which I have achieved using the caret package to first split in half and then split the validation and test half again.
+There may still be a need for cleaning variables but it might be best to look at this after addressing some of the basic questions
 
 ## Basic Questions
 
 ### a. What is the distribution of number of passengers per trip? 
 
-```{r eval = FALSE}
-  summary(train$passenger_count)
-  
+The number of passengers per trip is a discrete value and has a mean of `r train %>% summarise(mean = mean(passenger_count)) %>% pull() %>% round(2)`. As this is count data which has a zero lower bound and the mean is close to 1, we would expect to see something like a poisson distibution which is highly right-skewed with a mode of 1 down to the maximum value of 6. This is precisely what we see in the below plot.
+
+```{r eval = TRUE}
   ggplot(train, aes(passenger_count)) +
     geom_bar() + 
     scale_x_continuous(breaks = c(1:6)) + 
+    scale_y_continuous(labels = comma) +
     ggtitle("Distribution of Passengers") +
+    labs(x = "Number of Passengers") +
     theme_minimal()
 ```
 
-
 ### b. What is the distribution of payment_type? 
 
-```{r eval = FALSE}
+The below plot shows the frequency associated with each payment type and clearly indicates a bimodal structure within the categorical variable. Paying by cash or card represent the two options, with a variable small number of disputed, not charged or unknown payments. 
 
+```{r eval = TRUE}
+  ggplot(train, aes(payment_type)) +
+      geom_bar() + 
+      ggtitle("Distribution of Payment Type") +
+      labs(x = "Payment Method", y = "Frequency") +
+      theme_minimal()
 ```
 
+Interestingly, I will show below that tips are only really recorded when the passenger pays with card. Cash tips are obviously just pocketed by the driver.
 
 ### c. What is the distribution of fare amount? 
 
-```{r eval = FALSE}
+Fare amount is a right-skewed distribution with a median of `r train %>% summarise(median(fare_amount)) %>% pull() %>% round(2)` and a mean of `r train %>% summarise(mean(fare_amount)) %>% pull() %>% round(2)`. The most expensive fares are over $400 but most fares are below $50. Strangely, there is a large spike at exactly $52 which may suggest situations where the drive does not go by the meter and instead has a fixed cost for a certain route.
 
+```{r eval = TRUE}
+  ggplot(train, aes(fare_amount)) +
+      geom_histogram(bins = 500) + 
+      scale_y_continuous(labels = comma) +
+      ggtitle("Distribution of Fare Amount") +
+      labs(x = "Fare Amount", y = "Frequency") +
+      theme_minimal()
 ```
 
+Stealing a bit of thunder from my future investigations I am able to classify where these routes are and confirm that `r train_2 %>% select(fare_amount,pickup_zone) %>% filter(fare_amount == 52) %>% count(pickup_zone) %>% arrange(desc(n)) %>% head(1) %>% select(n) %>% pull()` are picked up from JFK Airport and `r train_2 %>% select(fare_amount,dropoff_zone) %>% filter(fare_amount == 52) %>% count(dropoff_zone) %>% arrange(desc(n)) %>% head(1) %>% select(n) %>% pull()` are being dropped off at JFK airport. As shown below, these passengers are mainly being taken to and from Manhattan.
+
+```{r eval = TRUE}
+  pickup_JFK <- train_2 %>%
+    select(fare_amount,pickup_zone,dropoff_borough) %>%
+    filter(fare_amount == 52) %>%
+    filter(pickup_zone == "JFK Airport") %>%
+    count(dropoff_borough) %>%
+    arrange(desc(n))
+
+  pickup_JFK
+
+  dropoff_JFK <- train_2 %>%
+    select(fare_amount,dropoff_zone,pickup_borough) %>%
+    filter(fare_amount == 52) %>%
+    filter(dropoff_zone == "JFK Airport") %>%
+    count(pickup_borough) %>%
+    arrange(desc(n))
+  
+  dropoff_JFK
+```
 
 ### d. What is the distribution of tip amount? 
+The below plot shows the distribution of tip amount as predominatly 0 and then tailing off despite some large outlier tip values. 
 
-```{r eval = FALSE}
-
+```{r eval = TRUE}
+  ggplot(train,aes(tip_amount)) +
+      geom_histogram(bins = 500) + 
+      ggtitle("Distribution of Tip Amount") +
+      labs(x = "Tip Amount", y = "Frequency") +
+      theme_minimal()
 ```
 
+This plot isn't very clear so I have zoomed in on the data to show tips up to $20 and colour coded this based on the payment method. It is clear from this plot that drivers are more than likely receiving tips but just not recording them when the payment is with cash. 
+
+```{r eval = TRUE, echo = FALSE}
+  ggplot(train,aes(tip_amount, fill = payment_type)) +
+    geom_histogram(bins = 500) + 
+    coord_cartesian(xlim = c(0,20),ylim=c(0, 800000))+
+    scale_x_continuous(breaks = c(1:20)) +
+    scale_y_continuous(labels = comma) +
+    ggtitle("Only Card Tips are Recorded") +
+    labs(x = "Tip Amount", y = "Frequency") +
+    theme_minimal()
+```
+
+The distribution of only card payments, where we can more reliably consider the tip amount resembles a poisson distribution around a mean of `r train %>% select(tip_amount,payment_type) %>% filter(payment_type == "CRD")%>% summarise(mean = mean(tip_amount)) %>% pull() %>% round(2)`.
+
+```{r eval = TRUE}
+card_tip <- train %>%
+    select(tip_amount,payment_type) %>%
+    filter(payment_type == "CRD")
+
+ggplot(card_tip, aes(tip_amount)) +
+    geom_density() + 
+    coord_cartesian(xlim = c(0,20)) +
+    ggtitle("Distribution of Tip Amount When Paid With Card") +
+    labs(x = "Tip Amount") +
+    theme_minimal()
+```
 
 ### e. What is the distribution of total amount? 
 
+The distribution of total amount looks much like that of fare amount, that is a heavily right-skewed distributon, although the spike at $52 has been washed out somewhat by tips and taxes.
 ```{r eval = FALSE}
-
+  ggplot(train, aes(total_amount)) +
+    geom_histogram(bins = 500) + 
+    scale_y_continuous(labels = comma) +
+    ggtitle("Distribution of Total Amount") +
+    labs(x = "Total Amount", y = "Frequency") +
+    theme_minimal()
 ```
-
 
 ### f. What are top 5 busiest hours of the day? 
 
-```{r eval = FALSE}
+As one might expect, the busiest hours for taxis are in the evening, where between 6-11pm where there is a noticeable platform compared with the rest of the day. 
 
+```{r eval = TRUE}
+  busy_hours <- train %>%
+    group_by(pickup_hour) %>%
+    summarise(count= n()) %>%
+    mutate(rank = rank(desc(count))) %>%
+    mutate(top_5 = case_when(rank <= 5 ~ "Yes",
+                             TRUE ~ "No"))
 ```
 
+```{r eval = TRUE}
+  ggplot(busy_hours,aes(x = pickup_hour,y= count, fill = top_5)) +
+    geom_bar(stat = "identity") +
+    scale_fill_manual(values=c("grey","red")) +
+    scale_y_continuous(labels = comma) +
+    ggtitle("Top 5 Busiest Hours - 6-11pm") +
+    labs(fill = "Top 5", x = "Pickup Hour", y = "Frequency") + 
+    theme_minimal()
+```
+
+It would be interesting to see how working in the period of time performs as one might expect it the market to be saturated with relatively short low yield trips as people travel to meet engagements.
 
 ### g. What are the top 10 busiest locations of the city? 
 
-I've located some taxi zones on the [Taxi and Limousine commision site](https://www1.nyc.gov/site/tlc/about/tlc-trip-record-data.page) and have tried to match this with the data to identify both pickup and drop off locations that could suit the 'trip' idea better.
+As touched on earlier, with this question in mind I sourced some additional spatial data to help make sense of the location coordinates provided in the data set. The below plot shows why I feel this was necessary, as each coordinate was relatively distinct and so made it very challenging to group the data together. 
+
+```{r eval = TRUE}
+  distinct_pickup <- train %>% distinct(pickup_longitude, pickup_latitude) 
+  sample_index <- sample(1:nrow(distinct_pickup), nrow(distinct_pickup)/100)
+  distinct_sample <- distinct_pickup[sample_index,]
+
+    ggplot(distinct_sample, aes(x = pickup_longitude, y = pickup_latitude)) + 
+      geom_point(alpha = 0.3, size = 0.01) + 
+      xlim(-74.05,-73.85) + 
+      ylim(40.65,40.85) + 
+      ggtitle("Coordinates of Pickups") +
+      labs(x = "Longitude", y = "Latitude") + 
+      theme_minimal()
+```
+
+I could have rounded the coordinates to effectively generate a grid system, and this what I would have attempted if I wasn't able to locate a shapefile which served a similar purpose but provided more meaning to the data.
+
+Fortunately I found a great shapefile of taxi zones at the [Taxi and Limousine commision site](https://www1.nyc.gov/site/tlc/about/tlc-trip-record-data.page) and I was able to join the data based on the simple features themselves. 
+
+```{r eval = TRUE}
+  busy_pickup_locations <- train_2 %>%
+    group_by(pickup_zone) %>%
+    summarise(pickup= n()) 
+  
+  busy_dropoff_locations <- train_2 %>%
+    group_by(dropoff_zone) %>%
+    summarise(dropoff= n())
+  
+  busy_overall <- busy_pickup_locations %>%
+    left_join(busy_dropoff_locations, by = c("pickup_zone" = "dropoff_zone")) %>%
+    mutate(overall = pickup + dropoff) %>%
+    select(zone = pickup_zone, overall) %>%
+    mutate(rank = rank(desc(overall))) %>%
+    mutate(top_10 = case_when(rank <= 10 ~ "Yes",
+                             TRUE ~ "No"))
+  
+  busy_overall %>% filter(top_10 == "Yes") %>% arrange (desc(overall)) %>% select(zone, trips = overall)
+```
+
+And this allows us to see the zones on the map and clearly see that trips are primarily occuring on Manhattan Island and to and from the airports.
+
+```{r eval = TRUE}
+  ggplot(taxi_zone_busy) + 
+    geom_sf(mapping = aes(fill = overall, colour = borough)) +
+    scale_fill_gradient(low = "white", high = "red", label = comma) + 
+    ggtitle("Taxi Zone Pickups") +
+    labs(x = "Longitude", y = "Latitude", fill = "Number of Pickups", colour = "Borough") + 
+    theme_minimal() 
+```
 
 ### h. Which trip has the highest standard deviation of travel time? 
 
