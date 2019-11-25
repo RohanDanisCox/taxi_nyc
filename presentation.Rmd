@@ -28,6 +28,14 @@ train <- read_feather("split_data/train.feather")
 train_2 <- read_feather("split_data/train_2.feather")
 val <- read_feather("split_data/val.feather")
 taxi_zone_busy <- readRDS("taxi_zone_busy.rds")
+all_hacks <- read_feather("all_hacks.feather")
+taxi_zones <- read_sf("taxi_zones") %>%
+    st_transform(4326)
+top_hack <- read_feather("top_hack.feather")
+top_10_hacks <- read_feather("top_10_hacks.feather")
+typical_taxi <- read_feather("typical_taxi.feather")
+location_time <- read_feather("location_time.feather")
+day_hour <- read_feather("day_hour.feather")
 ```
 
 ## Setting Up
@@ -589,19 +597,245 @@ This model achieves an RMSE of `r rf_rmse_2 %>% pull()`. This suggests that on a
 
 ### c. If you were a taxi owner, how would you maximize your earnings in a day? 
 
+I am going to approach the next two questions in different ways - the first requires identifying top performing drivers aka hacks and then looking specifically at their data to understand what they do differently. The second is to look purely at the things which I can focus on, time and location.
+
+After grouping the full data set by hack license (not by medallian as it appears as though some drivers work across several cabs) I am able to compute some summary statistics, such as:
+
+- total trips
+- total working time in hours
+- total miles travelled
+- total fares
+- total tips
+- earnings per day
+- earnings per trip
+- earnings per hour
+- earnings per mile
+- earnings per hour and per mile
+- petrol costs, assumed to be 28 miles per gallon and a cost of $3.32 per gallon
+
+I then want to filter out outliers which is mainly achieved by doing some common sense stuff, i.e. Must have worked at least 10 days, at least 4 hours per day, done over 100 trips and travelled at least 50 miles.
+
+The objective here is to maximise earnings in a day, so I think a good place to start is who is maximising earnings per hour after petrol is account for. 
 
 ```{r eval = TRUE, echo = FALSE}
 
+  all_hacks_1 <- all_hacks %>%
+    filter(total_days_working > 10 &
+             total_trips > 100 & 
+             total_miles_travelled > 50 & 
+             avg_hours_per_day > 4) %>%
+    arrange(desc(avg_hourly_earnings_after_petrol))  
+  
+  top_10 <- all_hacks_1 %>%
+    head(10)
+  
+  top_10
 ```
+
+After doing that I have the top 10 drivers, who are all earning over $90 per hour. Take a bow `r top_10 %>% head(1) %>% select(hack_license) %>% pull()`.
+
+So what is this driver doing that is so amazing? Well they are primarily waiting at La Guardia to take people into Manhattan.
+
+```{r eval = TRUE, echo = FALSE}
+  top_hack_1 <- taxi_zones %>%
+    left_join(top_hack %>% count(pickup_zone), by = c("zone" = "pickup_zone")) %>%
+    mutate(n = case_when(is.na(n) ~ as.integer(0),
+                         TRUE ~ n))
+  
+  top_hack_2 <- taxi_zones %>%
+    left_join(top_hack %>% count(dropoff_zone), by = c("zone" = "dropoff_zone")) %>%
+    mutate(n = case_when(is.na(n) ~ as.integer(0),
+                         TRUE ~ n))
+  
+  ggplot(top_hack_1) + 
+    geom_sf(mapping = aes(fill = n)) +
+    scale_fill_gradient(low = "white", high = "red") + 
+    ggtitle("Top Hack Pickups") +
+    labs(x = "Longitude", y = "Latitude", fill = "Number of Pickups") + 
+    xlim(-74.05,-73.75) + 
+    ylim(40.6,40.9) + 
+    theme(panel.grid.major = element_line(color = gray(0.5), linetype = "dashed", size = 0.1))
+  
+  ggplot(top_hack_2) + 
+    geom_sf(mapping = aes(fill = n)) +
+    scale_fill_gradient(low = "white", high = "red") + 
+    ggtitle("Top Hack Dropoffs") +
+    labs(x = "Longitude", y = "Latitude", fill = "Number of Dropoffs") + 
+    xlim(-74.05,-73.75) + 
+    ylim(40.6,40.9) + 
+    theme(panel.grid.major = element_line(color = gray(0.5), linetype = "dashed", size = 0.1)) 
+  
+```
+
+What about the other guys in the top 10, are they all at La Guardia? No, in fact as you can see below the preferred lurking spot is actually at JFK.
+
+```{r eval = TRUE, echo = FALSE}
+  top_10_hacks_1 <- taxi_zones %>%
+    left_join(top_10_hacks %>% count(pickup_zone), by = c("zone" = "pickup_zone")) %>%
+    mutate(n = case_when(is.na(n) ~ as.integer(0),
+                         TRUE ~ n))
+  
+  top_10_hacks_2 <- taxi_zones %>%
+    left_join(top_10_hacks %>% count(dropoff_zone), by = c("zone" = "dropoff_zone")) %>%
+    mutate(n = case_when(is.na(n) ~ as.integer(0),
+                         TRUE ~ n))
+  
+  ggplot(top_10_hacks_1) + 
+    geom_sf(mapping = aes(fill = n)) +
+    scale_fill_gradient(low = "white", high = "red") + 
+    ggtitle("Top 10 Hacks Pickups") +
+    labs(x = "Longitude", y = "Latitude", fill = "Number of Pickups") + 
+    theme(panel.grid.major = element_line(color = gray(0.5), linetype = "dashed", size = 0.1))
+  
+  ggplot(top_10_hacks_2) + 
+    geom_sf(mapping = aes(fill = n)) +
+    scale_fill_gradient(low = "white", high = "red") + 
+    ggtitle("Top 10 Hacks Dropoffs") +
+    labs(x = "Longitude", y = "Latitude", fill = "Number of Dropoffs") + 
+    theme(panel.grid.major = element_line(color = gray(0.5), linetype = "dashed", size = 0.1)) 
+  
+```
+
+What about when it comes to hours? Well the top guy does exclusively late nights and the top 10 seem to prefer that as well.
+
+```{r eval = TRUE, echo = FALSE}
+  ggplot(top_hack, aes(x = day_of_week, y = pickup_hour)) + 
+      geom_point(alpha = 0.3, colour = "red") + 
+      ggtitle("Top Hack - Works Late Nights") +
+      labs(x = "Day of Week", y = "Pickup Hour", subtitle = "Day doesn't seem to matter, but this person is a night owl") + 
+      theme_minimal()
+
+  ggplot(top_10_hacks, aes(x = day_of_week, y = pickup_hour)) + 
+    geom_jitter(alpha = 0.1, colour = "red") + 
+    ggtitle("Top 10 Hacks - Mostly Work Nights") +
+    labs(x = "Day of Week", y = "Pickup Hour") + 
+    theme_minimal()
+```
+
+Regardless, what these guys are doing is definitely working as they are well above the pack. Based on this, to maximise my earnings I would base my pickup strategy entirely around working out of La Guardia or JFK and aim to work late evenings to early mornings.
+
+```{r eval = TRUE, echo = FALSE}
+ggplot(all_hacks_1,aes(x = total_hours_working, y = avg_hourly_earnings_after_petrol)) + 
+    geom_point(alpha = 0.1, size = 0.2) + 
+    geom_point(data = top_10, aes(x = total_hours_working, y = avg_hourly_earnings_after_petrol), colour = "red", size = 0.7) +
+    ggtitle("Total Hours Working vs Hourly Earnings After Petrol - Top Hacks in Red") +
+    labs(x = "Total Hours Working", y = "Hourly Earnings After Petrol", subtitle = "Focusing on the Airports at Night Works") + 
+    theme_minimal()
+  
+```
+
+<b>Post-work note: I've noticed two key assumption that will most likely void the above. I've assumed hourly work to be based on the sum of trip times which excludes the important time spent looking for a fare. An improved analysis would require looking at the sequence of dropoff and pickup times to understand periods of work.</b>
 
 ### d. If you were a taxi owner, how would you minimize your work time while retaining the average wages earned by a typical taxi in the dataset? 
 
 ```{r eval = TRUE, echo = FALSE}
 
+medians <- all_hacks %>%
+    summarise(median_trips = median(total_trips),
+              median_total_hours = median(total_hours_working),
+              median_miles_travelled = median(total_miles_travelled),
+              median_total_fare = median(total_fare),
+              median_total_tips = median(total_tips),
+              median_monthly_take = median(total_take),
+              median_paid_for_petrol = median(total_paid_for_petrol),
+              median_earnings = median(total_earnings),
+              median_days_working = median(total_days_working),
+              average_medallians_used = mean(total_mediallians_used), # gives me an idea of the outliers, median is 1
+              median_hours_per_day = median(avg_hours_per_day),
+              median_earnings_per_day = median(avg_earnings_per_day),
+              median_earnings_per_trip = median(avg_earnings_per_trip),
+              median_earnings_per_hour = median(avg_earnings_per_hour),
+              median_earnings_per_mile = median(avg_earnings_per_mile),
+              median_earnings_per_hour_per_mile = median(avg_earnings_per_hour_and_per_mile),
+              median_hourly_earnings_after_petrol = median(avg_hourly_earnings_after_petrol))
+  location_time_1 <- location_time %>%
+    filter(total_trips > 100) %>%
+    filter(!is.na(pickup_zone))
+  
+  hours_required <- location_time_1 %>%
+    mutate(quartile = ntile(avg_earnings_per_hour,4),
+           hours_required_to_meet_month_earnings = medians$median_earnings/avg_earnings_per_hour)
+```
+
+For this question I am taking an entirely different approach, not looking at drivers but instead looking at the things a driver can influence, where they look for fares, on what days and at what times.  
+
+The median monthly earnings for a driver in this data is $`r medians %>% select(median_earnings) %>% pull() %>% round(0)`. Looking at the various pickup locations, days and times the top quartile (assuming I could find it) would have an average of `r hours_required %>% filter(quartile == 4) %>% summarise(mean(hours_required_to_meet_month_earnings)) %>% pull() %>% round(0)` hours to hit this average monthly earnings. Assuming I like the idea of weekends this works out to a bit over 3 hours per day.
+
+So ignoring locations for now, what day and hours should I be working? Basically I want to be starting after midnight and packing in before 6am.
+
+```{r eval = TRUE, echo = FALSE}
+  ggplot(day_hour,aes(x = pickup_hour,y = avg_earnings_per_hour, colour = day_of_week)) +
+      geom_line() + 
+      ggtitle("Hourly Earnings By Hour and Day") +
+      labs(x = "Hour", y = "Hourly Earnings", subtitle = "The best bet are the hours between midnight and 5 on weekdays") + 
+      scale_color_discrete() +
+      theme_minimal()
+```
+
+So with that in mind, I've generated a map which could sit in my dashboard window telling me where I should be:
+```{r eval = TRUE, echo = FALSE}
+location_time_1 <- location_time %>%
+    filter(total_trips > 100) %>%
+    filter(!is.na(pickup_zone)) %>%
+    filter(!day_of_week %in% c("Sat","Sun")) %>%
+    filter(pickup_hour < 6) %>%
+    group_by(pickup_zone) %>%
+    summarise(mean_hourly_earnings = mean(avg_earnings_per_hour))
+  
+  map_guide <- taxi_zones %>%
+    left_join(location_time_1, by = c("zone" = "pickup_zone"))
+  
+  ggplot(map_guide) + 
+    geom_sf(mapping = aes(fill = mean_hourly_earnings)) +
+    scale_fill_gradient2(low = "white", high = "red", na.value = "white") + 
+    ggtitle("Working in these zones early weekday mornings...") +
+    labs(x = "Longitude", y = "Latitude", fill = "Average Hourly Earnings", subtitle = "I can earn the median wage in only 90 hours or 4 hours per day") + 
+    theme(panel.grid.major = element_line(color = gray(0.5), linetype = "dashed", size = 0.1)) 
 ```
 
 ### e. If you run a taxi company with 10 taxis, how would you maximize your earnings? 
 
+Running with a similar theme, for this question I will look at medallions rather than drivers and rank them into deciles by total earnings after petrol. Following the KISS methodology of keeping things simple I've then looked for the taxi zones which have the highest average decile score and identified the following:
+
+```{r eval = TRUE, echo = FALSE}
+company_plan <- cleaning_3 %>%
+    group_by(medallion) %>%
+    mutate(total_miles_travelled = sum(trip_distance),
+              total_take = sum(total_amount),
+              total_paid_for_petrol = total_miles_travelled/28*3.32,
+              total_earnings = total_take - total_paid_for_petrol) %>%
+    ungroup() %>%
+    mutate(earnings_decile = ntile(total_earnings,10)) %>%
+    group_by(pickup_borough,pickup_zone,day_of_week,pickup_hour) %>%
+    summarise(n = n(),
+              competing_taxi = n_distinct(medallion),
+              average_earnings_decile = mean(earnings_decile)) 
+  
+  company_plan_1 <- company_plan %>%
+    filter(n >1000)
+  
+  company_plan_2 <- company_plan_1 %>%
+    group_by(pickup_zone,pickup_borough) %>%
+    summarise(average_earnings_decile = mean(average_earnings_decile)) %>%
+    arrange(desc(average_earnings_decile)) %>%
+    head(10)
+  
+  company_plan_2
+```
+
+The final instructions to my fleet of drivers is work the below map until you get tired then come in and sub out. Since the fares are out there and the cost of petrol and cars is relatively inexpensive, it makes sense to just go hell-for-leather the whole time.
+
 ```{r eval = TRUE, echo = FALSE}
 
+  company_guide <- taxi_zones %>%
+    left_join(company_plan_2, by = c("zone" = "pickup_zone"))
+  
+  ggplot(company_guide) + 
+    geom_sf(mapping = aes(fill = average_earnings_decile)) +
+    scale_fill_gradient2(low = "white", high = "red", na.value = "white") + 
+    xlim(-74.05,-73.85) + 
+    ylim(40.65,40.85) + 
+    ggtitle("Run 24/7 from these locations") +
+    labs(x = "Longitude", y = "Latitude", fill = "Average Earnings Decile", subtitle = "This is where medallions are maximising their value") + 
+    theme(panel.grid.major = element_line(color = gray(0.5), linetype = "dashed", size = 0.1))
 ```

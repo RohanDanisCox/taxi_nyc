@@ -62,7 +62,6 @@
     mutate(day_of_week = wday(pickup_datetime, label = TRUE))
   
   
-  
   # ---- 4) Split the data ---- 
   
   set.seed(11)
@@ -555,6 +554,323 @@
   
 # ---- 16)  c. If you were a taxi owner, how would you maximize your earnings in a day?   ----
   
+  all_hacks <- cleaning_3 %>%
+    group_by(hack_license) %>%
+    summarise(total_trips = n(),
+              total_hours_working = sum(trip_time_in_secs)/60/60,
+              total_miles_travelled = sum(trip_distance),
+              total_fare = sum(fare_amount),
+              total_tips = sum(tip_amount),
+              total_take = sum(total_amount),
+              total_paid_for_petrol = total_miles_travelled/28*3.32,
+              total_earnings = total_take - total_paid_for_petrol,
+              total_days_working = n_distinct(date(pickup_datetime)),
+              total_mediallians_used = n_distinct(medallion),
+              avg_hours_per_day = total_hours_working/total_days_working,
+              avg_earnings_per_day = total_take/total_days_working,
+              avg_earnings_per_trip = total_take/total_trips,
+              avg_earnings_per_hour = total_take/total_hours_working,
+              avg_earnings_per_mile = total_take/total_miles_travelled,
+              avg_earnings_per_hour_and_per_mile = total_take/total_hours_working/total_miles_travelled,
+              avg_hourly_earnings_after_petrol = total_earnings / total_hours_working) %>%
+    ungroup()
+  
+  write_feather(all_hacks, "all_hacks.feather")
+
+  all_hacks_1 <- all_hacks %>%
+    filter(total_days_working > 10 &
+             total_trips > 100 & 
+             total_miles_travelled > 50 & 
+             avg_hours_per_day > 4) %>%
+    arrange(desc(avg_hourly_earnings_after_petrol)) 
+  
+  top_10 <- all_hacks_1 %>%
+    head(10)
+  
+  top_10_ID <- top_10[,1]
+  
+  top_hack <- cleaning_3 %>%
+    filter(hack_license == "1E94B13BB698BC3C98178429C45FDEED")
+  
+  top_10_hacks <- cleaning_3 %>%
+    filter(hack_license %in% top_10_ID$hack_license)
+  
+  write_feather(top_hack,"top_hack.feather")
+  write_feather(top_10_hacks,"top_10_hacks.feather")
+  
+  # Look at just the top person 
+  
+  top_hack_1 <- taxi_zones %>%
+    left_join(top_hack %>% count(pickup_zone), by = c("zone" = "pickup_zone")) %>%
+    mutate(n = case_when(is.na(n) ~ as.integer(0),
+                         TRUE ~ n))
+  
+  top_hack_2 <- taxi_zones %>%
+    left_join(top_hack %>% count(dropoff_zone), by = c("zone" = "dropoff_zone")) %>%
+    mutate(n = case_when(is.na(n) ~ as.integer(0),
+                         TRUE ~ n))
+  
+  ggplot(top_hack_1) + 
+    geom_sf(mapping = aes(fill = n)) +
+    scale_fill_gradient(low = "white", high = "red") + 
+    ggtitle("Top Hack Pickups") +
+    labs(x = "Longitude", y = "Latitude", fill = "Number of Pickups") + 
+    xlim(-74.05,-73.75) + 
+    ylim(40.6,40.9) + 
+    theme(panel.grid.major = element_line(color = gray(0.5), linetype = "dashed", size = 0.1))
+  
+  ggplot(top_hack_2) + 
+    geom_sf(mapping = aes(fill = n)) +
+    scale_fill_gradient(low = "white", high = "red") + 
+    ggtitle("Top Hack Dropoffs") +
+    labs(x = "Longitude", y = "Latitude", fill = "Number of Dropoffs") + 
+    xlim(-74.05,-73.75) + 
+    ylim(40.6,40.9) + 
+    theme(panel.grid.major = element_line(color = gray(0.5), linetype = "dashed", size = 0.1)) 
+  
+  # Look at the rest of the top 10
+  top_10_hacks_1 <- taxi_zones %>%
+    left_join(top_10_hacks %>% count(pickup_zone), by = c("zone" = "pickup_zone")) %>%
+    mutate(n = case_when(is.na(n) ~ as.integer(0),
+                         TRUE ~ n))
+  
+  top_10_hacks_2 <- taxi_zones %>%
+    left_join(top_10_hacks %>% count(dropoff_zone), by = c("zone" = "dropoff_zone")) %>%
+    mutate(n = case_when(is.na(n) ~ as.integer(0),
+                         TRUE ~ n))
+  
+  ggplot(top_10_hacks_1) + 
+    geom_sf(mapping = aes(fill = n)) +
+    scale_fill_gradient(low = "white", high = "red") + 
+    ggtitle("Top 10 Hacks Pickups") +
+    labs(x = "Longitude", y = "Latitude", fill = "Number of Pickups") + 
+    theme(panel.grid.major = element_line(color = gray(0.5), linetype = "dashed", size = 0.1))
+  
+  ggplot(top_10_hacks_2) + 
+    geom_sf(mapping = aes(fill = n)) +
+    scale_fill_gradient(low = "white", high = "red") + 
+    ggtitle("Top 10 Hacks Dropoffs") +
+    labs(x = "Longitude", y = "Latitude", fill = "Number of Dropoffs") + 
+    theme(panel.grid.major = element_line(color = gray(0.5), linetype = "dashed", size = 0.1)) 
+  
+  ggplot(top_hack, aes(x = day_of_week, y = pickup_hour)) + 
+    geom_point(alpha = 0.3, colour = "red") + 
+    ggtitle("Top Hack - Works Late Nights") +
+    labs(x = "Day of Week", y = "Pickup Hour", subtitle = "Day doesn't seem to matter, but this person is a night owl") + 
+    theme_minimal()
+  
+  ggplot(top_10_hacks, aes(x = day_of_week, y = pickup_hour)) + 
+    geom_jitter(alpha = 0.1, colour = "red") + 
+    ggtitle("Top 10 Hacks - Mostly Work Nights") +
+    labs(x = "Day of Week", y = "Pickup Hour") + 
+    theme_minimal()
+  
+  # How do they compare?
+  
+  ggplot(all_hacks_1,aes(x = total_hours_working, y = avg_hourly_earnings_after_petrol)) + 
+    geom_point(alpha = 0.1, size = 0.2) + 
+    geom_point(data = top_10, aes(x = total_hours_working, y = avg_hourly_earnings_after_petrol), colour = "red", size = 0.7) +
+    ggtitle("Total Hours Working vs Hourly Earnings After Petrol - Top Hacks in Red") +
+    labs(x = "Total Hours Working", y = "Hourly Earnings After Petrol", subtitle = "Focusing on the Airports at Night Works") + 
+    theme_minimal()
+
+  
 # ---- 17)  d. If you were a taxi owner, how would you minimize your work time while retaining the average wages earned by a typical taxi in the dataset?    ----
   
+  ## What is a typical taxi doing
+  
+  medians <- all_hacks %>%
+    summarise(median_trips = median(total_trips),
+              median_total_hours = median(total_hours_working),
+              median_miles_travelled = median(total_miles_travelled),
+              median_total_fare = median(total_fare),
+              median_total_tips = median(total_tips),
+              median_monthly_take = median(total_take),
+              median_paid_for_petrol = median(total_paid_for_petrol),
+              median_earnings = median(total_earnings),
+              median_days_working = median(total_days_working),
+              average_medallians_used = mean(total_mediallians_used), # gives me an idea of the outliers, median is 1
+              median_hours_per_day = median(avg_hours_per_day),
+              median_earnings_per_day = median(avg_earnings_per_day),
+              median_earnings_per_trip = median(avg_earnings_per_trip),
+              median_earnings_per_hour = median(avg_earnings_per_hour),
+              median_earnings_per_mile = median(avg_earnings_per_mile),
+              median_earnings_per_hour_per_mile = median(avg_earnings_per_hour_and_per_mile),
+              median_hourly_earnings_after_petrol = median(avg_hourly_earnings_after_petrol))
+  
+  medians %>% select(median_earnings) %>% pull() %>% round(0)
+  
+  location_time <- cleaning_3 %>%
+    group_by(pickup_zone,day_of_week,pickup_hour) %>%
+    summarise(total_trips = n(),
+              total_hours = sum(trip_time_in_secs)/60/60,
+              total_miles_travelled = sum(trip_distance),
+              total_fare = sum(fare_amount),
+              total_tips = sum(tip_amount),
+              total_take = sum(total_amount),
+              total_paid_for_petrol = total_miles_travelled/28*3.32,
+              total_earnings = total_take - total_paid_for_petrol,
+              avg_earnings_per_trip = total_earnings/total_trips,
+              avg_earnings_per_hour = total_earnings/total_hours) %>%
+    ungroup()
+  
+  write_feather(location_time,"location_time.feather")
+  
+  location_time_1 <- location_time %>%
+    filter(total_trips > 100) %>%
+    filter(!is.na(pickup_zone))
+  
+  hours_required <- location_time_1 %>%
+    mutate(quartile = ntile(avg_earnings_per_hour,4),
+           hours_required_to_meet_month_earnings = medians$median_earnings/avg_earnings_per_hour)
+  
+  hours_required %>% filter(quartile == 4) %>% summarise(mean(hours_required_to_meet_month_earnings)) %>% pull() %>% round(0)
+  
+  day_hour <- cleaning_3 %>%
+    group_by(day_of_week,pickup_hour) %>%
+    summarise(total_trips = n(),
+              total_hours = sum(trip_time_in_secs)/60/60,
+              total_miles_travelled = sum(trip_distance),
+              total_fare = sum(fare_amount),
+              total_tips = sum(tip_amount),
+              total_take = sum(total_amount),
+              total_paid_for_petrol = total_miles_travelled/28*3.32,
+              total_earnings = total_take - total_paid_for_petrol,
+              avg_earnings_per_trip = total_earnings/total_trips,
+              avg_earnings_per_hour = total_earnings/total_hours) %>%
+    ungroup()
+  
+  write_feather(day_hour,"day_hour.feather")
+  
+  ggplot(day_hour,aes(x = pickup_hour,y = avg_earnings_per_hour, colour = day_of_week)) +
+    geom_line() + 
+    ggtitle("Hourly Earnings By Hour and Day") +
+    labs(x = "Hour", y = "Hourly Earnings", subtitle = "The best bet are the hours between midnight and 5 on weekdays") + 
+    scale_color_discrete() +
+    theme_minimal()
+  
+  location_time_1 <- location_time %>%
+    filter(total_trips > 100) %>%
+    filter(!is.na(pickup_zone)) %>%
+    filter(!day_of_week %in% c("Sat","Sun")) %>%
+    filter(pickup_hour < 6) %>%
+    group_by(pickup_zone) %>%
+    summarise(mean_hourly_earnings = mean(avg_earnings_per_hour))
+  
+  map_guide <- taxi_zones %>%
+    left_join(location_time_1, by = c("zone" = "pickup_zone"))
+  
+  ggplot(map_guide) + 
+    geom_sf(mapping = aes(fill = mean_hourly_earnings)) +
+    scale_fill_gradient2(low = "white", high = "red", na.value = "white") + 
+    ggtitle("Working in these zones early weekday mornings...") +
+    labs(x = "Longitude", y = "Latitude", fill = "Average Hourly Earnings", subtitle = "I can earn the median wage in only 90 hours or 4 hours per day") + 
+    theme(panel.grid.major = element_line(color = gray(0.5), linetype = "dashed", size = 0.1)) 
+  
 # ---- 18)  e. If you run a taxi company with 10 taxis, how would you maximize your earnings?    ----
+  
+  company_plan <- cleaning_3 %>%
+    group_by(medallion) %>%
+    mutate(total_miles_travelled = sum(trip_distance),
+              total_take = sum(total_amount),
+              total_paid_for_petrol = total_miles_travelled/28*3.32,
+              total_earnings = total_take - total_paid_for_petrol) %>%
+    ungroup() %>%
+    mutate(earnings_decile = ntile(total_earnings,10)) %>%
+    group_by(pickup_borough,pickup_zone,day_of_week,pickup_hour) %>%
+    summarise(n = n(),
+              competing_taxi = n_distinct(medallion),
+              average_earnings_decile = mean(earnings_decile)) 
+  
+  company_plan_1 <- company_plan %>%
+    filter(n >1000)
+  
+  company_plan_2 <- company_plan_1 %>%
+    group_by(pickup_zone,pickup_borough) %>%
+    summarise(average_earnings_decile = mean(average_earnings_decile)) %>%
+    arrange(desc(average_earnings_decile)) %>%
+    head(10)
+  
+  company_guide <- taxi_zones %>%
+    left_join(company_plan_2, by = c("zone" = "pickup_zone"))
+  
+  ggplot(company_guide) + 
+    geom_sf(mapping = aes(fill = average_earnings_decile)) +
+    scale_fill_gradient2(low = "white", high = "red", na.value = "white") + 
+    xlim(-74.05,-73.85) + 
+    ylim(40.65,40.85) + 
+    ggtitle("Run 24/7 from these locations") +
+    labs(x = "Longitude", y = "Latitude", fill = "Average Earnings Decile", subtitle = "This is where medallions are maximising their value") + 
+    theme(panel.grid.major = element_line(color = gray(0.5), linetype = "dashed", size = 0.1)) 
+  
+  
+# ---- 19)  Get the location information for the full data set    ----
+  
+  taxi_zones <- read_sf("taxi_zones") %>%
+    st_transform(4326)
+  
+  all_data_zones <- data %>%
+    mutate(pickup_lon = pickup_longitude,
+           pickup_lat = pickup_latitude,
+           dropoff_lon = dropoff_longitude,
+           dropoff_lat = dropoff_latitude)
+  
+  pickup <- st_as_sf(all_data_zones, coords = c("pickup_longitude", "pickup_latitude"), crs = 4326)
+  
+  system.time({
+    pickup_join <- pickup %>%
+      st_join(taxi_zones)
+  })
+  
+  post_pickup <- pickup_join %>%
+    mutate(pickup_zone = zone, 
+           pickup_location = LocationID,
+           pickup_borough = borough,
+           pickup_geometry = geometry) %>%
+    select(-c(OBJECTID,Shape_Leng,Shape_Area,zone,LocationID,borough,pickup_geometry)) %>%
+    st_drop_geometry() 
+  
+  post_pickup_1 <- post_pickup %>%
+    filter(!is.na(dropoff_longitude))
+  
+  dropoff <- st_as_sf(post_pickup, coords = c("dropoff_longitude", "dropoff_latitude"), crs = 4326)
+  
+  system.time({
+    dropoff_join <- dropoff %>%
+      st_join(taxi_zones)
+  })
+  
+  post_dropoff <- dropoff_join %>%
+    mutate(dropoff_zone = zone, 
+           dropoff_location = LocationID,
+           dropoff_borough = borough,
+           dropoff_geometry = geometry) %>%
+    select(-c(OBJECTID,Shape_Leng,Shape_Area,zone,LocationID,borough,geometry,dropoff_geometry)) %>%
+    st_drop_geometry()
+  
+  all_data <- post_dropoff
+  
+  system.time({
+    cleaning_1 <- all_data %>%
+      filter(passenger_count != 0) %>%
+      filter(trip_time_in_secs > 30) %>%
+      filter(trip_distance > 0.1 ) %>%
+      filter(pickup_lon > -75 & pickup_lon < -73) %>%
+      filter(dropoff_lon > -75 & dropoff_lon < -73) %>%
+      filter(pickup_lat > 40 & pickup_lat < 42) %>%
+      filter(dropoff_lat > 40 & dropoff_lat < 42) 
+  }
+  )
+  
+  cleaning_2 <- cleaning_1 %>%
+    mutate(avg_speed_mh = trip_distance/trip_time_in_secs * 60 * 60) %>%
+    filter(avg_speed_mh < 70)
+  
+  cleaning_3 <- cleaning_2 %>%
+    mutate(pickup_hour = hour(pickup_datetime)) %>%
+    mutate(day_of_week = wday(pickup_datetime, label = TRUE))
+
+  write_feather(all_data,"all_data.feather")
+  
+  all_data <- read_feather("all_data.feather")
+  
