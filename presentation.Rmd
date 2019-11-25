@@ -1,7 +1,7 @@
 ---
 title: "NYC Taxi"
 author: "Rohan Danis-Cox"
-date: "23/11/2019"
+date: "26/11/2019"
 output: 
   html_document:
     toc: true
@@ -28,6 +28,10 @@ train <- read_feather("split_data/train.feather")
 train_2 <- read_feather("split_data/train_2.feather")
 val <- read_feather("split_data/val.feather")
 taxi_zone_busy <- readRDS("taxi_zone_busy.rds")
+shap_fare <- read_feather("shap_fare.feather")
+shap_time <- read_feather("shap_time.feather")
+nested_train_coord <- read_feather("nested_train_coord.feather")
+nested_train_zone <- read_feather("nested_train_zone.feather")
 all_hacks <- read_feather("all_hacks.feather")
 taxi_zones <- read_sf("taxi_zones") %>%
     st_transform(4326)
@@ -36,6 +40,7 @@ top_10_hacks <- read_feather("top_10_hacks.feather")
 typical_taxi <- read_feather("typical_taxi.feather")
 location_time <- read_feather("location_time.feather")
 day_hour <- read_feather("day_hour.feather")
+company_plan <- read_feather("company_plan.feather")
 ```
 
 ## Setting Up
@@ -68,7 +73,7 @@ There is a bit of fairly obvious filtering which should be done to remove observ
 * pickup or dropoff longitude less than -75 or greater than -73 
 * pickup or dropoff latitude greater than 42 or less than 40
 
-Furthermore, I can produce a few useful features like speed and day of week. I am going to assume the trip distance variable is in miles and therefore calculate speed in miles per hour. I am also assuming that average speed should be below 70 miles per hour.
+Furthermore, I can produce a few potentially useful features like speed and day of week. I am going to assume the trip distance variable is in miles and therefore calculate speed in miles per hour. I am also assuming that average speed should be below 70 miles per hour.
 
 ```{r eval=FALSE}
   cleaning_1 <- data %>%
@@ -118,13 +123,13 @@ There may still be a need for cleaning variables but it might be best to look at
 
 The number of passengers per trip is a discrete value and has a mean of `r train %>% summarise(mean = mean(passenger_count)) %>% pull() %>% round(2)`. As this is count data which has a zero lower bound and the mean is close to 1, we would expect to see something like a poisson distibution which is highly right-skewed with a mode of 1 down to the maximum value of 6. This is precisely what we see in the below plot.
 
-```{r eval = TRUE}
+```{r eval = TRUE, echo = FALSE}
   ggplot(train, aes(passenger_count)) +
     geom_bar() + 
     scale_x_continuous(breaks = c(1:6)) + 
     scale_y_continuous(labels = comma) +
     ggtitle("Distribution of Passengers") +
-    labs(x = "Number of Passengers") +
+    labs(x = "Number of Passengers", y = "Frequency", subtitle = "Resembles a poisson distribution") +
     theme_minimal()
 ```
 
@@ -132,11 +137,12 @@ The number of passengers per trip is a discrete value and has a mean of `r train
 
 The below plot shows the frequency associated with each payment type and clearly indicates a bimodal structure within the categorical variable. Paying by cash or card represent the two options, with a variable small number of disputed, not charged or unknown payments. 
 
-```{r eval = TRUE}
+```{r eval = TRUE, echo = FALSE}
   ggplot(train, aes(payment_type)) +
       geom_bar() + 
+      scale_y_continuous(labels = comma) +
       ggtitle("Distribution of Payment Type") +
-      labs(x = "Payment Method", y = "Frequency") +
+      labs(x = "Payment Method", y = "Frequency", subtitle = "Bimodal categorical variable") +
       theme_minimal()
 ```
 
@@ -146,12 +152,12 @@ Interestingly, I will show below that tips are only really recorded when the pas
 
 Fare amount is a right-skewed distribution with a median of `r train %>% summarise(median(fare_amount)) %>% pull() %>% round(2)` and a mean of `r train %>% summarise(mean(fare_amount)) %>% pull() %>% round(2)`. The most expensive fares are over $400 but most fares are below $50. Strangely, there is a large spike at exactly $52 which may suggest situations where the drive does not go by the meter and instead has a fixed cost for a certain route.
 
-```{r eval = TRUE}
+```{r eval = TRUE, echo = FALSE}
   ggplot(train, aes(fare_amount)) +
       geom_histogram(bins = 500) + 
       scale_y_continuous(labels = comma) +
       ggtitle("Distribution of Fare Amount") +
-      labs(x = "Fare Amount", y = "Frequency") +
+      labs(x = "Fare Amount", y = "Frequency", subtitle = "Notice the strange tick at $52") +
       theme_minimal()
 ```
 
@@ -180,15 +186,16 @@ Stealing a bit of thunder from my future investigations I am able to classify wh
 ### d. What is the distribution of tip amount? 
 The below plot shows the distribution of tip amount as predominatly 0 and then tailing off despite some large outlier tip values. 
 
-```{r eval = TRUE}
+```{r eval = TRUE, echo = FALSE}
   ggplot(train,aes(tip_amount)) +
       geom_histogram(bins = 500) + 
+      scale_y_continuous(labels = comma) +
       ggtitle("Distribution of Tip Amount") +
       labs(x = "Tip Amount", y = "Frequency") +
       theme_minimal()
 ```
 
-This plot isn't very clear so I have zoomed in on the data to show tips up to $20 and colour coded this based on the payment method. It is clear from this plot that drivers are more than likely receiving tips but just not recording them when the payment is with cash. 
+This plot isn't very clear so I have zoomed in on the data to show tips up to $20 and colour coded this based on the payment method. It is clear from this plot that drivers are more than likely also receiving cash tips but just not recording them. 
 
 ```{r eval = TRUE, echo = FALSE}
   ggplot(train,aes(tip_amount, fill = payment_type)) +
@@ -197,11 +204,11 @@ This plot isn't very clear so I have zoomed in on the data to show tips up to $2
     scale_x_continuous(breaks = c(1:20)) +
     scale_y_continuous(labels = comma) +
     ggtitle("Only Card Tips are Recorded") +
-    labs(x = "Tip Amount", y = "Frequency") +
+    labs(x = "Tip Amount", y = "Frequency", fill = "Payment Type") +
     theme_minimal()
 ```
 
-The distribution of only card payments, where we can more reliably consider the tip amount resembles a poisson distribution around a mean of `r train %>% select(tip_amount,payment_type) %>% filter(payment_type == "CRD")%>% summarise(mean = mean(tip_amount)) %>% pull() %>% round(2)`.
+The distribution of tip amount by card, where we can more reliably consider the tip amount, resembles a poisson distribution around a mean of `r train %>% select(tip_amount,payment_type) %>% filter(payment_type == "CRD")%>% summarise(mean = mean(tip_amount)) %>% pull() %>% round(2)`.
 
 ```{r eval = TRUE, echo = FALSE}
 card_tip <- train %>%
@@ -211,14 +218,16 @@ card_tip <- train %>%
 ggplot(card_tip, aes(tip_amount)) +
     geom_histogram(bins = 500) + 
     coord_cartesian(xlim = c(0,20)) +
+    scale_y_continuous(labels = comma) +
     ggtitle("Distribution of Tip Amount When Paid With Card") +
-    labs(x = "Tip Amount") +
+    labs(x = "Tip Amount", y ="Frequency", subtitle = "Resembles a poisson distribution") +
     theme_minimal()
 ```
 
 ### e. What is the distribution of total amount? 
 
 The distribution of total amount looks much like that of fare amount, that is a heavily right-skewed distributon, although the spike at $52 has been washed out somewhat by tips and taxes.
+
 ```{r eval = TRUE, echo = FALSE}
   ggplot(train, aes(total_amount)) +
     geom_histogram(bins = 500) + 
@@ -230,7 +239,7 @@ The distribution of total amount looks much like that of fare amount, that is a 
 
 ### f. What are top 5 busiest hours of the day? 
 
-As one might expect, the busiest hours for taxis are in the evening, where between 6-11pm where there is a noticeable platform compared with the rest of the day. 
+As one might expect, the busiest hours for taxis are in the evening, where between 6-11pm where there is a noticeable platform compared with the rest of the day. It's also of interest that fares plummet between midnight and 5am but recover within 2 hours for the morning rush.
 
 ```{r eval = TRUE}
   busy_hours <- train %>%
@@ -246,8 +255,8 @@ As one might expect, the busiest hours for taxis are in the evening, where betwe
     geom_bar(stat = "identity") +
     scale_fill_manual(values=c("grey","red")) +
     scale_y_continuous(labels = comma) +
-    ggtitle("Top 5 Busiest Hours - 6-11pm") +
-    labs(fill = "Top 5", x = "Pickup Hour", y = "Frequency") + 
+    ggtitle("Top 5 Busiest Hours") +
+    labs(fill = "Top 5", x = "Pickup Hour", y = "Frequency", subtitle = "6-11pm is the busiest period for taxi journeys") + 
     theme_minimal()
 ```
 
@@ -267,7 +276,7 @@ As touched on earlier, with this question in mind I sourced some additional spat
       xlim(-74.05,-73.85) + 
       ylim(40.65,40.85) + 
       ggtitle("Coordinates of Pickups") +
-      labs(x = "Longitude", y = "Latitude") + 
+      labs(x = "Longitude", y = "Latitude", subtitle = "Easy to make out Manhattan and even Central Park") + 
       theme_minimal()
 ```
 
@@ -304,7 +313,7 @@ The above table shows that the busiest locations, as measured by taxi zones of p
 
 Visualising the data on a map clearly shows Manhattan's prominence but also indicates a large number of trips to the airports at La Guardia and JFK.
 
-```{r eval = TRUE}
+```{r eval = TRUE, echo = FALSE}
   ggplot(taxi_zone_busy) + 
     geom_sf(mapping = aes(fill = overall, colour = borough)) +
     scale_fill_gradient(low = "white", high = "red", label = comma) + 
@@ -315,7 +324,7 @@ Visualising the data on a map clearly shows Manhattan's prominence but also indi
 
 ### h. Which trip has the highest standard deviation of travel time? 
 
-Originally I wanted to classify this using a trip consisting of a zones and hours. The reason I wanted to do this is that travel time could be expected to vary greatly based on traffic (which was probably the actual intent of the question). But when I did this JFK to JFK showed up pretty unanimously at all hours. This is probably fair since a some trips would have been a few hundred meters down the road and surely others would have been half-way across the city and back to retrieve important items. 
+Originally I wanted to classify this using a trip consisting of a zones and hours. The reason I wanted to do this is that travel time could be expected to vary greatly based on traffic (which was probably the actual intent of the question). But when I did this JFK to JFK showed up pretty unanimously at all hours. This is probably fair since a some trips would have been a few hundred meters down the road and surely others would have been half-way across the city and back to retrieve important items. So instead I am looking independent of time and looking at trips with at least 20 observations. 
 
 ```{r eval = TRUE}
   high_sd_time <- train_2 %>%
@@ -333,7 +342,7 @@ Originally I wanted to classify this using a trip consisting of a zones and hour
   high_sd_time
 ```
 
-So instead I am looking independent of time and looking at trips with at least 20 observations. Going from Masbeth to JFK tops the lot with a standard deviation of over `high_sd_time %>% head(1) %>% mutate(x = round(st_dev_time,0)/60) %>% select(x) %>% pull()` minutes. These trips are on average `r train_2 %>% filter(pickup_zone == "Maspeth" & dropoff_zone == "JFK Airport") %>% summarise(mean = round(mean(trip_distance),2)) %>% pull()` miles and so this seems reasonable. The below map shows these two trips to give you an idae of the distances involved.
+Going from Masbeth to JFK tops the lot with a standard deviation of over `high_sd_time %>% head(1) %>% mutate(x = round(st_dev_time,0)/60) %>% select(x) %>% pull()` minutes. These trips are on average `r train_2 %>% filter(pickup_zone == "Maspeth" & dropoff_zone == "JFK Airport") %>% summarise(mean = round(mean(trip_distance),2)) %>% pull()` miles and so this seems reasonable. The below map shows these two trips to give you an idae of the distances involved.
 
 ```{r eval = TRUE, echo = FALSE}
 high_sd_map <- taxi_zone_busy %>%
@@ -346,7 +355,7 @@ high_sd_map <- taxi_zone_busy %>%
       geom_sf(mapping = aes(fill = high_sd)) + 
       scale_fill_manual(values = c("white","red", "blue")) +
       ggtitle("Trips with High Standard Deviation of Time") +
-      labs(x = "Longitude", y = "Latitude", fill = "Trip") + 
+      labs(x = "Longitude", y = "Latitude", fill = "Trip", subtitle = "We expect to see large distances") + 
       coord_sf(xlim = c(-73.7,-74.05),ylim=c(40.55,40.85))+
       theme(panel.grid.major = element_line(color = gray(0.5), linetype = "dashed", size = 0.1))
 ```
@@ -384,7 +393,7 @@ Again, this makes sense as they are predominatenly stort trips, mostly below 2 m
       geom_sf(mapping = aes(fill = low_sd)) + 
       scale_fill_manual(values = c("white","red", "blue")) +
       ggtitle("Trips with Low Standard Deviation in Fare") +
-      labs(x = "Longitude", y = "Latitude", fill = "Trip") + 
+      labs(x = "Longitude", y = "Latitude", fill = "Trip", subtitle = "We expect to see short distances") + 
       coord_sf(xlim = c(-73.95,-74.05),ylim=c(40.66,40.76))+
       theme(panel.grid.major = element_line(color = gray(0.5), linetype = "dashed", size = 0.1))
 ```
@@ -396,13 +405,19 @@ Again, this makes sense as they are predominatenly stort trips, mostly below 2 m
 
 Mean can be used as a measure of central tendancy when the data is symetrical, i.e. not exihibiting signs of skewness. As established above, fare is heavily right-skewed when viewing the data as a whole, but when looking at particular trips it could be expected that you would see distributions which are more normally distributed. 
 
-We can look at parametric statistical tests to understand how a sample distribution compares to a normal distribution, with one example being the Shapiro-Wilk’s test. A statisitc close to 1 suggests normal distribution but it is best to view the histogram or qplot to confirm.
+We can look at parametric statistical tests to understand how a sample distribution compares to a normal distribution, with one example being the Shapiro-Wilk’s test. A statisitc close to 1 suggests normal distribution, but it is best to view the histogram or qplot to confirm.
 
 Just a quick aside, when applying the Shapiro-Wilk test in R the sample size is limited to between 3 and 5000. This is primarily because the null hypothesis is that the distibution is normal (which is odd for an hypothesis test as usually it would be the other way around) and very small samples tend to confirm the null while very large sample sizes tend to reject the null.
 
 Let's take a look at the fare over trips: 
 
-```{r eval = TRUE, echo = FALSE, warning = FALSE}
+```{r eval = TRUE, echo = FALSE}
+  trips <- train_2 %>%
+      filter(!is.na(pickup_zone) & !is.na(dropoff_zone)) %>%
+      mutate(trip = paste0(pickup_zone," to ", dropoff_zone))
+```
+
+```{r eval = FALSE, echo = FALSE, warning = FALSE}
   trips <- train_2 %>%
       filter(!is.na(pickup_zone) & !is.na(dropoff_zone)) %>%
       mutate(trip = paste0(pickup_zone," to ", dropoff_zone))
@@ -423,7 +438,8 @@ Let's take a look at the fare over trips:
              tidied = map(shapiro,tidy)) %>%
       unnest(tidied) %>%
       select(-c(data,shapiro))
-  
+```
+```{r eval = TRUE, echo = FALSE, warning = FALSE}
   shap_fare_1 <- shap_fare %>%
     top_n(10,statistic)
   
@@ -439,7 +455,7 @@ The above table shows the top 10 trips based on the Shapiro-Wilk test. Examining
   ggplot(example_1,aes(fare_amount)) +
     geom_histogram(bins = 50) +
     ggtitle("Distribution of Fare Amount from Midtown North to Seaport") +
-    labs(x = "Fare Amount", y = "Frequency") +
+    labs(x = "Fare Amount", y = "Frequency", subtitle = "Looks fairly symmetrical") +
     theme_minimal()
 ```
 
@@ -460,13 +476,13 @@ On the other hand, this table shows some low scoring trips (I've excluded trips 
   ggplot(example_2,aes(fare_amount)) +
     geom_histogram(bins = 50) +
     ggtitle("Distribution of Fare Amount from Brooklyn Heights to Cobble Hill") +
-    labs(x = "Fare Amount", y = "Frequency") +
+    labs(x = "Fare Amount", y = "Frequency", subtitle = "Right skew outliers - not symmetrical") +
     theme_minimal()
 ```
 
 The same can be done for trip time:
 
-```{r eval = TRUE, echo = FALSE}
+```{r eval = FALSE, echo = FALSE}
   shap_time <- trips %>%
     select(trip,trip_time_in_secs) %>%
     group_by(trip) %>%
@@ -490,6 +506,13 @@ The same can be done for trip time:
   shap_time_1
 ```
 
+```{r eval = TRUE, echo = FALSE}
+  shap_time_1 <- shap_time %>%
+    top_n(10,statistic)
+  
+  shap_time_1
+```
+
 And we would expect a similar result:
 
 ```{r eval = TRUE, echo = FALSE}
@@ -499,13 +522,13 @@ And we would expect a similar result:
     ggplot(example_3,aes(trip_time_in_secs)) +
       geom_histogram(bins = 50) +
       ggtitle("Distribution of Trip Time from Financial District North to Central Park") +
-      labs(x = "Fare Amount", y = "Frequency") +
+      labs(x = "Fare Amount", y = "Frequency", subtitle = "Normal and hence symmetrical distribution") +
       theme_minimal()
 ```
 
 ### b. Can we build a model to predict fare and tip amount given pick up and drop off coordinates, time of day and day of week? 
 
-Thinking logically, we should be able to predict fares with reasonable accuracy. My belief for this stems from the prescibed nature of fares where we could expect variables like distance travelled, length of trip, number of passengers, time of day, tolls etc to be taken into account in determining a fare. Whether we can accurately predict the fare from only location, time of day and DAY of week is less clear (I am assuming the question meant to say day of week as this would seem to me to make more sense).
+Thinking logically, we should be able to predict fares with reasonable accuracy. My belief for this stems from the prescibed nature of fares where we could expect variables like distance travelled, length of trip, number of passengers, time of day, tolls etc to be taken into account in determining a fare. Whether we can accurately predict the fare from only location, time of day and day of week is less clear (I am assuming the question meant to say day of week as this would seem to me to make more sense).
 
 In terms of tip amount, we have already established that the data only captures tip amounts when they are paid by card. Even if I were to isolate for this, I wouldn't expect a model to be very effective in estimating tip amounts as it depends on many more human variables which are very challenging to measure. How generous is the passenger? How friendly was the driver? How urgent was the trip? All variables that are going to be very challenging to measure.
 
@@ -520,7 +543,7 @@ Below I have demonstrated how a random forest using only 5,000 observations from
                                    pickup_hour >= 18 & pickup_hour < 22 ~ "Evening",
                                    pickup_hour >= 22 | pickup_hour < 2 ~ "Late Night")))
 
-val_1 <- val %>%
+  val_1 <- val %>%
     mutate(pickup_time = as.factor(case_when(pickup_hour >= 2 & pickup_hour < 7 ~ "Early Morning",
                                    pickup_hour >= 7 & pickup_hour < 12 ~ "Morning",
                                    pickup_hour >= 12 & pickup_hour < 18 ~ "Afternoon",
@@ -562,7 +585,7 @@ This model achieves an root mean squared error (RMSE) of `r rf_rmse %>% pull()`.
       geom_point(alpha = 0.1, size = 0.3) +
       coord_cartesian(xlim = c(0,60),ylim=c(0, 60)) +
       ggtitle("Actual vs Predicted - Fare Amount") +
-      labs(x = "Fare Amount", y = "Predicted Fare Amount") +
+      labs(x = "Fare Amount", y = "Predicted Fare Amount", subtitle = "Seems to predict the data reasonably well") +
       theme_minimal()
 ```
 
@@ -591,8 +614,60 @@ This model achieves an RMSE of `r rf_rmse_2 %>% pull()`. This suggests that on a
       geom_point(alpha = 0.1, size = 0.3) +
       coord_cartesian(xlim = c(0,20),ylim=c(0, 20)) +
       ggtitle("Actual vs Predicted - Tip Amount") +
-      labs(x = "Tip Amount", y = "Predicted Fare Amount") +
+      labs(x = "Tip Amount", y = "Predicted Fare Amount", subtitle = "Prediction underestimates tips") +
       theme_minimal()
+```
+
+Another approach might be to look at building a number of smaller models to help understand which parts of the data set are explained well by a model. For example, we can build a different model for each hour of the day and day of the week and see how well the pickup and dropoff coordinates do at explaining fare amount.
+
+```{r eval = FALSE, echo = TRUE}
+  nested_train <- train_2 %>%
+    select(fare_amount,pickup_lon,pickup_lat,dropoff_lon,dropoff_lat,pickup_hour,day_of_week) %>%
+    group_by(pickup_hour,day_of_week) %>%
+    nest()
+      
+  nested_train_coord <- nested_train %>%
+    mutate(model = map(data,~lm(formula = fare_amount ~ pickup_lon + pickup_lat +dropoff_lon +dropoff_lat,data = .x)))
+    mutate(glance = map(model,glance)) %>%
+    unnest(glance) %>%
+    select(-c(data,model))
+```
+
+As shown below, pickup and dropoff locations as measured in coordinates do a fairly poor job of explaining the variation in fare amount. They are particularly poor in the early hours of the morning.
+
+```{r eval = TRUE,echo = FALSE}
+  ggplot(nested_train_coord,aes(x = pickup_hour,y = r.squared, colour = day_of_week)) +
+    geom_line() + 
+    ggtitle("How Much Variation In Fare Amount is Explained by Coordinates") +
+    labs(x = "Hour", y = "R Squared", colour = "Day of Week", subtitle = "All models explain less than 50% of the variance in fare amount") + 
+    scale_color_discrete() +
+    theme_minimal()
+```
+
+On the other hand, we could replace the coordinates with the taxi zones I added for the earlier question and see whether that makes a difference.
+
+```{r eval = FALSE}
+  nested_train_1 <- train_2 %>%
+    select(fare_amount,pickup_zone,dropoff_zone,pickup_hour,day_of_week) %>%
+    group_by(pickup_hour,day_of_week) %>%
+    nest()
+  
+  nested_train_zone <- nested_train_1 %>%
+    mutate(model = map(data,~lm(formula = fare_amount ~ pickup_zone + dropoff_zone,data = .x)),
+           glance = map(model,glance)) %>%
+    unnest(glance) %>%
+    select(-c(data,model))
+```
+
+Here we see a remarkably different story, with nearly all models explaining above 60% of the variation in fare amount. The very interesting point is that 5am, which was a genuine challenge to model with coordinates is the standout performer within the hour/day models. This is an great example of where generating a categorical variable from a continuous variable can help the model better interpret the underlying patterns.
+
+```{r eval = TRUE,echo = FALSE}
+  ggplot(nested_train_zone,aes(x = pickup_hour,y = r.squared, colour = day_of_week)) +
+    geom_line() + 
+    ggtitle("How Much Variation In Fare Amount is Explained by Taxi Zone") +
+    labs(x = "Hour", y = "R Squared", colour = "Day of Week", subtitle = "Using zones instead of coordinates drastically improves the models") + 
+    scale_color_discrete() +
+    theme_minimal()
 ```
 
 ### c. If you were a taxi owner, how would you maximize your earnings in a day? 
@@ -651,7 +726,7 @@ So what is this driver doing that is so amazing? Well they are primarily waiting
     geom_sf(mapping = aes(fill = n)) +
     scale_fill_gradient(low = "white", high = "red") + 
     ggtitle("Top Hack Pickups") +
-    labs(x = "Longitude", y = "Latitude", fill = "Number of Pickups") + 
+    labs(x = "Longitude", y = "Latitude", fill = "Number of Pickups", subtitle = "Nearly exclusively La Guardia") + 
     xlim(-74.05,-73.75) + 
     ylim(40.6,40.9) + 
     theme(panel.grid.major = element_line(color = gray(0.5), linetype = "dashed", size = 0.1))
@@ -660,7 +735,7 @@ So what is this driver doing that is so amazing? Well they are primarily waiting
     geom_sf(mapping = aes(fill = n)) +
     scale_fill_gradient(low = "white", high = "red") + 
     ggtitle("Top Hack Dropoffs") +
-    labs(x = "Longitude", y = "Latitude", fill = "Number of Dropoffs") + 
+    labs(x = "Longitude", y = "Latitude", fill = "Number of Dropoffs", subtitle = "Dropping off in Manhattan") + 
     xlim(-74.05,-73.75) + 
     ylim(40.6,40.9) + 
     theme(panel.grid.major = element_line(color = gray(0.5), linetype = "dashed", size = 0.1)) 
@@ -684,14 +759,14 @@ What about the other guys in the top 10, are they all at La Guardia? No, in fact
     geom_sf(mapping = aes(fill = n)) +
     scale_fill_gradient(low = "white", high = "red") + 
     ggtitle("Top 10 Hacks Pickups") +
-    labs(x = "Longitude", y = "Latitude", fill = "Number of Pickups") + 
+    labs(x = "Longitude", y = "Latitude", fill = "Number of Pickups", subtitle = "JFK over La Guardia") + 
     theme(panel.grid.major = element_line(color = gray(0.5), linetype = "dashed", size = 0.1))
   
   ggplot(top_10_hacks_2) + 
     geom_sf(mapping = aes(fill = n)) +
     scale_fill_gradient(low = "white", high = "red") + 
     ggtitle("Top 10 Hacks Dropoffs") +
-    labs(x = "Longitude", y = "Latitude", fill = "Number of Dropoffs") + 
+    labs(x = "Longitude", y = "Latitude", fill = "Number of Dropoffs", subtitle = "Trying to get back to JFK if possible") + 
     theme(panel.grid.major = element_line(color = gray(0.5), linetype = "dashed", size = 0.1)) 
   
 ```
@@ -721,7 +796,6 @@ ggplot(all_hacks_1,aes(x = total_hours_working, y = avg_hourly_earnings_after_pe
     ggtitle("Total Hours Working vs Hourly Earnings After Petrol - Top Hacks in Red") +
     labs(x = "Total Hours Working", y = "Hourly Earnings After Petrol", subtitle = "Focusing on the Airports at Night Works") + 
     theme_minimal()
-  
 ```
 
 <b>Post-work note: I've noticed two key assumption that will most likely void the above. I've assumed hourly work to be based on the sum of trip times which excludes the important time spent looking for a fare. An improved analysis would require looking at the sequence of dropoff and pickup times to understand periods of work.</b>
@@ -729,7 +803,6 @@ ggplot(all_hacks_1,aes(x = total_hours_working, y = avg_hourly_earnings_after_pe
 ### d. If you were a taxi owner, how would you minimize your work time while retaining the average wages earned by a typical taxi in the dataset? 
 
 ```{r eval = TRUE, echo = FALSE}
-
 medians <- all_hacks %>%
     summarise(median_trips = median(total_trips),
               median_total_hours = median(total_hours_working),
@@ -795,10 +868,10 @@ location_time_1 <- location_time %>%
 
 ### e. If you run a taxi company with 10 taxis, how would you maximize your earnings? 
 
-Running with a similar theme, for this question I will look at medallions rather than drivers and rank them into deciles by total earnings after petrol. Following the KISS methodology of keeping things simple I've then looked for the taxi zones which have the highest average decile score and identified the following:
+For this question I will try to find the areas where the taxis are consistently performing above expectation. My approach is to look at medallions rather than drivers and rank them into deciles by total earnings after petrol. From here, I can extract the taxi zones with the highest average decile score and identify the following:
 
-```{r eval = TRUE, echo = FALSE}
-company_plan <- cleaning_3 %>%
+```{r eval = FALSE, echo = TRUE}
+company_plan <- all_clean_data %>%
     group_by(medallion) %>%
     mutate(total_miles_travelled = sum(trip_distance),
               total_take = sum(total_amount),
@@ -810,7 +883,9 @@ company_plan <- cleaning_3 %>%
     summarise(n = n(),
               competing_taxi = n_distinct(medallion),
               average_earnings_decile = mean(earnings_decile)) 
-  
+```
+
+```{r eval = TRUE, echo = TRUE}
   company_plan_1 <- company_plan %>%
     filter(n >1000)
   
@@ -823,10 +898,9 @@ company_plan <- cleaning_3 %>%
   company_plan_2
 ```
 
-The final instructions to my fleet of drivers is work the below map until you get tired then come in and sub out. Since the fares are out there and the cost of petrol and cars is relatively inexpensive, it makes sense to just go hell-for-leather the whole time.
+With this information in hand, I would have my taxis run at a very high rate, using multiple drivers, as the I have noticed that the value of fares outweighs the cost in petrol (and most likely in car replacement). The below map suggests working mid to lower Manhattan and Brooklyn and that if these placed were focused on earnings would be likely to be above average.
 
 ```{r eval = TRUE, echo = FALSE}
-
   company_guide <- taxi_zones %>%
     left_join(company_plan_2, by = c("zone" = "pickup_zone"))
   
@@ -835,7 +909,7 @@ The final instructions to my fleet of drivers is work the below map until you ge
     scale_fill_gradient2(low = "white", high = "red", na.value = "white") + 
     xlim(-74.05,-73.85) + 
     ylim(40.65,40.85) + 
-    ggtitle("Run 24/7 from these locations") +
+    ggtitle("Operate for High Hours Focusing on these locations") +
     labs(x = "Longitude", y = "Latitude", fill = "Average Earnings Decile", subtitle = "This is where medallions are maximising their value") + 
     theme(panel.grid.major = element_line(color = gray(0.5), linetype = "dashed", size = 0.1))
 ```

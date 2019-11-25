@@ -418,6 +418,8 @@
     unnest(tidied) %>%
     select(-c(data,shapiro))
   
+  write_feather(shap_fare,"shap_fare.feather")
+  
   shap_fare_1 <- shap_fare %>%
     top_n(10,statistic)
   
@@ -460,6 +462,8 @@
     unnest(tidied) %>%
     select(-c(data,shapiro))
   
+  write_feather(shap_time, "shap_time.feather")
+  
   shap_time_1 <- shap_time %>%
     top_n(10,statistic)
   
@@ -474,30 +478,21 @@
   
 # ---- 15)  b. Can we build a model to predict fare and tip amount given pick up and drop off coordinates, time of day and week?     ----  
   
-# ---- 15a) Linear Model of fare_amount ---- 
+# ---- 15a) Random Forest of fare_amount ----
   
   train_1 <- train %>%
     mutate(pickup_time = as.factor(case_when(pickup_hour >= 2 & pickup_hour < 7 ~ "Early Morning",
-                                   pickup_hour >= 7 & pickup_hour < 12 ~ "Morning",
-                                   pickup_hour >= 12 & pickup_hour < 18 ~ "Afternoon",
-                                   pickup_hour >= 18 & pickup_hour < 22 ~ "Evening",
-                                   pickup_hour >= 22 | pickup_hour < 2 ~ "Late Night")))
-  
-  lm_1 <- lm(data = train_1, formula = fare_amount ~ pickup_longitude + pickup_latitude + 
-                dropoff_longitude + dropoff_latitude +
-                pickup_time + day_of_week)
+                                             pickup_hour >= 7 & pickup_hour < 12 ~ "Morning",
+                                             pickup_hour >= 12 & pickup_hour < 18 ~ "Afternoon",
+                                             pickup_hour >= 18 & pickup_hour < 22 ~ "Evening",
+                                             pickup_hour >= 22 | pickup_hour < 2 ~ "Late Night")))
   
   val_1 <- val %>%
     mutate(pickup_time = as.factor(case_when(pickup_hour >= 2 & pickup_hour < 7 ~ "Early Morning",
-                                   pickup_hour >= 7 & pickup_hour < 12 ~ "Morning",
-                                   pickup_hour >= 12 & pickup_hour < 18 ~ "Afternoon",
-                                   pickup_hour >= 18 & pickup_hour < 22 ~ "Evening",
-                                   pickup_hour >= 22 | pickup_hour < 2 ~ "Late Night")))
-  
-  val_pred <- val_1 %>%
-    mutate(pred = predict.lm(object = lm_1,newdata = val_1))
-  
-# ---- 15b) Random Forest of fare_amount ----
+                                             pickup_hour >= 7 & pickup_hour < 12 ~ "Morning",
+                                             pickup_hour >= 12 & pickup_hour < 18 ~ "Afternoon",
+                                             pickup_hour >= 18 & pickup_hour < 22 ~ "Evening",
+                                             pickup_hour >= 22 | pickup_hour < 2 ~ "Late Night")))
   
   # Absolutely not going to work with all the data. Maybe try a sample of 5-10k 
   
@@ -529,7 +524,7 @@
   
   varImpPlot(rf_1)
   
-# ---- 15c) Random Forest of tip_amount ----
+# ---- 15b) Random Forest of tip_amount ----
   
   rf_y_2 <- rf_sample$tip_amount
   
@@ -550,6 +545,52 @@
     coord_cartesian(xlim = c(0,20),ylim=c(0, 20)) +
     ggtitle("Actual vs Predicted - Tip Amount") +
     labs(x = "Tip Amount", y = "Predicted Fare Amount") +
+    theme_minimal()
+  
+# ---- 15c) Linear Model of fare_amount ---- 
+  
+  # Can we build a different model to explain where things are going wrong?
+
+  nested_train <- train_2 %>%
+    select(fare_amount,pickup_lon,pickup_lat,dropoff_lon,dropoff_lat,pickup_hour,day_of_week) %>%
+    group_by(pickup_hour,day_of_week) %>%
+    nest()
+      
+  nested_train_coord <- nested_train %>%
+    mutate(model = map(data,~lm(formula = fare_amount ~ pickup_lon + pickup_lat +dropoff_lon +dropoff_lat,data = .x)))
+    mutate(glance = map(model,glance)) %>%
+    unnest(glance) %>%
+    select(-c(data,model))
+  
+  ggplot(nested_train_coord,aes(x = pickup_hour,y = r.squared, colour = day_of_week)) +
+    geom_line() + 
+    ggtitle("How Much Variation In Fare Amount is Explained by Coordinates") +
+    labs(x = "Hour", y = "R Squared", colour = "Day of Week") + 
+    scale_color_discrete() +
+    theme_minimal()
+  
+  write_feather(nested_train_coord,"nested_train_coord.feather")
+  
+  # How about with taxi_zone 
+  
+  nested_train_1 <- train_2 %>%
+    select(fare_amount,pickup_zone,dropoff_zone,pickup_hour,day_of_week) %>%
+    group_by(pickup_hour,day_of_week) %>%
+    nest()
+  
+  nested_train_zone <- nested_train_1 %>%
+    mutate(model = map(data,~lm(formula = fare_amount ~ pickup_zone + dropoff_zone,data = .x)),
+           glance = map(model,glance)) %>%
+    unnest(glance) %>%
+    select(-c(data,model))
+  
+  write_feather(nested_train_zone,"nested_train_zone.feather")
+  
+  ggplot(nested_train_zone,aes(x = pickup_hour,y = r.squared, colour = day_of_week)) +
+    geom_line() + 
+    ggtitle("How Much Variation In Fare Amount is Explained by Taxi Zone") +
+    labs(x = "Hour", y = "R Squared", colour = "Day of Week") + 
+    scale_color_discrete() +
     theme_minimal()
   
 # ---- 16)  c. If you were a taxi owner, how would you maximize your earnings in a day?   ----
@@ -782,6 +823,8 @@
               competing_taxi = n_distinct(medallion),
               average_earnings_decile = mean(earnings_decile)) 
   
+  write_feather(company_plan,"company_plan.feather")
+  
   company_plan_1 <- company_plan %>%
     filter(n >1000)
   
@@ -869,8 +912,8 @@
   cleaning_3 <- cleaning_2 %>%
     mutate(pickup_hour = hour(pickup_datetime)) %>%
     mutate(day_of_week = wday(pickup_datetime, label = TRUE))
-
-  write_feather(all_data,"all_data.feather")
   
   all_data <- read_feather("all_data.feather")
+  
+  format(Sys.Date(),"%d %b %Y")
   
